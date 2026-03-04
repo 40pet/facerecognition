@@ -1,121 +1,124 @@
 from flask import Flask, request, jsonify
-import face_recognition
+import cv2
 import numpy as np
-import pickle
 import os
+from PIL import Image
 
 app = Flask(__name__)
 
-DATABASE = "faces.pkl"
+DATASET = "dataset"
+MODEL = "model.yml"
 
-# Load face database
-if os.path.exists(DATABASE):
-    with open(DATABASE, "rb") as f:
-        data = pickle.load(f)
-else:
-    data = {"encodings": [], "names": []}
+if not os.path.exists(DATASET):
+    os.makedirs(DATASET)
+
+recognizer = cv2.face.LBPHFaceRecognizer_create()
+face_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
+
+names = []
+
+
+def train_model():
+    faces = []
+    labels = []
+    names.clear()
+
+    for idx, person in enumerate(os.listdir(DATASET)):
+        person_path = os.path.join(DATASET, person)
+        names.append(person)
+
+        for img_name in os.listdir(person_path):
+            path = os.path.join(person_path, img_name)
+            img = Image.open(path).convert("L")
+            img_np = np.array(img, "uint8")
+
+            faces.append(img_np)
+            labels.append(idx)
+
+    if len(faces) > 0:
+        recognizer.train(faces, np.array(labels))
+        recognizer.save(MODEL)
+
+
+if os.path.exists(MODEL):
+    recognizer.read(MODEL)
 
 
 @app.route("/")
 def home():
-    return "Face Recognition API Running"
+    return "Face API running"
 
 
-# ---------------- REGISTER FACE ----------------
 @app.route("/register", methods=["POST"])
 def register():
 
     name = request.form.get("name")
 
     if "image" not in request.files:
-        return jsonify({"status": "error", "message": "no image"})
+        return jsonify({"status": "no image"})
 
-    image = request.files["image"]
+    file = request.files["image"]
 
-    img = face_recognition.load_image_file(image)
-    encodings = face_recognition.face_encodings(img)
+    person_dir = os.path.join(DATASET, name)
 
-    if len(encodings) == 0:
-        return jsonify({"status": "error", "message": "no face detected"})
+    if not os.path.exists(person_dir):
+        os.makedirs(person_dir)
 
-    encoding = encodings[0]
+    img = Image.open(file).convert("L")
+    img_np = np.array(img)
 
-    data["encodings"].append(encoding)
-    data["names"].append(name)
+    faces = face_cascade.detectMultiScale(img_np, 1.3, 5)
 
-    with open(DATABASE, "wb") as f:
-        pickle.dump(data, f)
+    if len(faces) == 0:
+        return jsonify({"status": "no face detected"})
 
-    return jsonify({
-        "status": "registered",
-        "name": name
-    })
+    for (x, y, w, h) in faces:
+        face = img_np[y:y+h, x:x+w]
+        cv2.imwrite(f"{person_dir}/{len(os.listdir(person_dir))+1}.jpg", face)
+
+    train_model()
+
+    return jsonify({"status": "registered", "name": name})
 
 
-# ---------------- RECOGNIZE FACE ----------------
 @app.route("/recognize", methods=["POST"])
 def recognize():
 
     if "image" not in request.files:
         return jsonify({"recognized": False})
 
-    image = request.files["image"]
+    file = request.files["image"]
 
-    img = face_recognition.load_image_file(image)
-    encodings = face_recognition.face_encodings(img)
+    img = Image.open(file).convert("L")
+    img_np = np.array(img)
 
-    if len(encodings) == 0:
-        return jsonify({"recognized": False})
+    faces = face_cascade.detectMultiScale(img_np, 1.3, 5)
 
-    face = encodings[0]
+    for (x, y, w, h) in faces:
+        face = img_np[y:y+h, x:x+w]
 
-    distances = face_recognition.face_distance(data["encodings"], face)
+        label, confidence = recognizer.predict(face)
 
-    if len(distances) == 0:
-        return jsonify({"recognized": False})
+        probability = max(0, 100 - confidence)
 
-    best_match = np.argmin(distances)
-    probability = 1 - distances[best_match]
+        if label < len(names):
 
-    if probability > 0.6:
-
-        return jsonify({
-            "recognized": True,
-            "name": data["names"][best_match],
-            "probability": float(probability)
-        })
+            return jsonify({
+                "recognized": True,
+                "name": names[label],
+                "probability": probability
+            })
 
     return jsonify({"recognized": False})
 
 
-# ---------------- LIST REGISTERED USERS ----------------
-@app.route("/faces", methods=["GET"])
+@app.route("/faces")
 def list_faces():
-
-    return jsonify({
-        "faces": data["names"]
-    })
-
-
-# ---------------- DELETE FACE ----------------
-@app.route("/delete", methods=["POST"])
-def delete_face():
-
-    name = request.form.get("name")
-
-    if name not in data["names"]:
-        return jsonify({"status": "not found"})
-
-    index = data["names"].index(name)
-
-    data["names"].pop(index)
-    data["encodings"].pop(index)
-
-    with open(DATABASE, "wb") as f:
-        pickle.dump(data, f)
-
-    return jsonify({"status": "deleted", "name": name})
+    return jsonify({"faces": os.listdir(DATASET)})
 
 
 if __name__ == "__main__":
+    train_model()
     app.run(host="0.0.0.0", port=10000)
