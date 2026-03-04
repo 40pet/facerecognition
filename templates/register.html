@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Register Face</title>
+</head>
+
+<body>
+
+<h2>Register New Face</h2>
+
+<input id="name" placeholder="Enter name">
+
+<br><br>
+
+<video id="video" width="320" height="240" autoplay></video>
+
+<br>
+
+<button onclick="capture()">Capture</button>
+
+<canvas id="canvas" width="320" height="240" style="display:none;"></canvas>
+
+<script>
+
+navigator.mediaDevices.getUserMedia({video:true})
+.then(stream=>{
+document.getElementById("video").srcObject = stream;
+});
+
+function capture(){
+
+let canvas = document.getElementById("canvas");
+let video = document.getElementById("video");
+
+canvas.getContext('2d').drawImage(video,0,0);
+
+canvas.toBlob(function(blob){
+
+let form = new FormData();
+form.append("image", blob);
+form.append("name", document.getElementById("name").value);
+
+fetch("/register",{
+method:"POST",
+body:form
+});
+
+});
+
+}
+
+</script>
+
+</body>
+</html>
