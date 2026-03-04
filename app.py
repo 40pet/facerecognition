@@ -1,124 +1,79 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, render_template, jsonify
 import cv2
 import numpy as np
 import os
-from PIL import Image
+from insightface.app import FaceAnalysis
+from numpy.linalg import norm
 
 app = Flask(__name__)
 
-DATASET = "dataset"
-MODEL = "model.yml"
+FACE_DIR = "faces"
 
-if not os.path.exists(DATASET):
-    os.makedirs(DATASET)
+face_app = FaceAnalysis()
+face_app.prepare(ctx_id=0)
 
-recognizer = cv2.face.LBPHFaceRecognizer_create()
-face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-)
-
-names = []
-
-
-def train_model():
-    faces = []
-    labels = []
-    names.clear()
-
-    for idx, person in enumerate(os.listdir(DATASET)):
-        person_path = os.path.join(DATASET, person)
-        names.append(person)
-
-        for img_name in os.listdir(person_path):
-            path = os.path.join(person_path, img_name)
-            img = Image.open(path).convert("L")
-            img_np = np.array(img, "uint8")
-
-            faces.append(img_np)
-            labels.append(idx)
-
-    if len(faces) > 0:
-        recognizer.train(faces, np.array(labels))
-        recognizer.save(MODEL)
-
-
-if os.path.exists(MODEL):
-    recognizer.read(MODEL)
+def cosine(a,b):
+    return np.dot(a,b)/(norm(a)*norm(b))
 
 
 @app.route("/")
-def home():
-    return "Face API running"
+def index():
+    return render_template("register.html")
 
+
+# REGISTER FACE
 
 @app.route("/register", methods=["POST"])
 def register():
 
-    name = request.form.get("name")
-
-    if "image" not in request.files:
-        return jsonify({"status": "no image"})
-
+    name = request.form["name"]
     file = request.files["image"]
 
-    person_dir = os.path.join(DATASET, name)
+    path = os.path.join(FACE_DIR, name+".jpg")
 
-    if not os.path.exists(person_dir):
-        os.makedirs(person_dir)
+    file.save(path)
 
-    img = Image.open(file).convert("L")
-    img_np = np.array(img)
+    return "saved"
 
-    faces = face_cascade.detectMultiScale(img_np, 1.3, 5)
 
-    if len(faces) == 0:
-        return jsonify({"status": "no face detected"})
-
-    for (x, y, w, h) in faces:
-        face = img_np[y:y+h, x:x+w]
-        cv2.imwrite(f"{person_dir}/{len(os.listdir(person_dir))+1}.jpg", face)
-
-    train_model()
-
-    return jsonify({"status": "registered", "name": name})
-
+# RECOGNIZE FACE
 
 @app.route("/recognize", methods=["POST"])
 def recognize():
 
-    if "image" not in request.files:
-        return jsonify({"recognized": False})
-
     file = request.files["image"]
 
-    img = Image.open(file).convert("L")
-    img_np = np.array(img)
+    img = cv2.imdecode(np.frombuffer(file.read(),np.uint8),cv2.IMREAD_COLOR)
 
-    faces = face_cascade.detectMultiScale(img_np, 1.3, 5)
+    faces = face_app.get(img)
 
-    for (x, y, w, h) in faces:
-        face = img_np[y:y+h, x:x+w]
+    if len(faces)==0:
+        return jsonify({"result":"unknown"})
 
-        label, confidence = recognizer.predict(face)
+    emb = faces[0].embedding
 
-        probability = max(0, 100 - confidence)
+    best = 0
+    best_name = "unknown"
 
-        if label < len(names):
+    for f in os.listdir(FACE_DIR):
 
-            return jsonify({
-                "recognized": True,
-                "name": names[label],
-                "probability": probability
-            })
+        db_img = cv2.imread(os.path.join(FACE_DIR,f))
+        db_face = face_app.get(db_img)
 
-    return jsonify({"recognized": False})
+        if len(db_face)==0:
+            continue
 
+        score = cosine(emb, db_face[0].embedding)
 
-@app.route("/faces")
-def list_faces():
-    return jsonify({"faces": os.listdir(DATASET)})
+        if score > best:
+            best = score
+            best_name = f
+
+    if best > 0.4:
+        return jsonify({"result":"recognized","name":best_name})
+
+    return jsonify({"result":"unknown"})
 
 
 if __name__ == "__main__":
-    train_model()
-    app.run(host="0.0.0.0", port=10000)
+    app.run()
